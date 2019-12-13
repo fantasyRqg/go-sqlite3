@@ -9,20 +9,8 @@
 package sqlite3
 
 /*
-#cgo CFLAGS: -std=gnu99
-#cgo CFLAGS: -DSQLITE_ENABLE_RTREE
-#cgo CFLAGS: -DSQLITE_THREADSAFE=1
-#cgo CFLAGS: -DHAVE_USLEEP=1
-#cgo CFLAGS: -DSQLITE_ENABLE_FTS3
-#cgo CFLAGS: -DSQLITE_ENABLE_FTS3_PARENTHESIS
-#cgo CFLAGS: -DSQLITE_ENABLE_FTS4_UNICODE61
-#cgo CFLAGS: -DSQLITE_TRACE_SIZE_LIMIT=15
-#cgo CFLAGS: -DSQLITE_OMIT_DEPRECATED
-#cgo CFLAGS: -DSQLITE_DISABLE_INTRINSIC
-#cgo CFLAGS: -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1
-#cgo CFLAGS: -DSQLITE_ENABLE_UPDATE_DELETE_LIMIT
-#cgo CFLAGS: -Wno-deprecated-declarations
-#cgo linux,!android CFLAGS: -DHAVE_PREAD64=1 -DHAVE_PWRITE64=1
+#cgo CFLAGS: -DUSE_LIBSQLITE3
+
 #ifndef USE_LIBSQLITE3
 #include <sqlite3-binding.h>
 #else
@@ -994,6 +982,8 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	txlock := "BEGIN"
 
 	// PRAGMA's
+	encryptKey := ""
+	kdfIter := ""
 	autoVacuum := -1
 	busyTimeout := 5000
 	caseSensitiveLike := -1
@@ -1014,6 +1004,16 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		//sqlcipher key
+		encryptKey = params.Get("_key")
+		if encryptKey == "" {
+			encryptKey = "password"
+			_ = fmt.Errorf("sqlcipher database must have password\n")
+		}
+
+		//sqlcipher kdf_iter
+		kdfIter = params.Get("_kdf_iter")
 
 		// Authentication
 		if _, ok := params["_auth"]; ok {
@@ -1365,6 +1365,22 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 			return lastError(db)
 		}
 		return nil
+	}
+
+	//sqlcipher
+
+	if encryptKey != "" {
+		if err := exec(fmt.Sprintf("PRAGMA key = %s;", encryptKey)); err != nil {
+			C.sqlite3_close_v2(db)
+			return nil, err
+		}
+	}
+
+	if kdfIter != "" {
+		if err := exec(fmt.Sprintf("PRAGMA kdf_iter = %s;", kdfIter)); err != nil {
+			C.sqlite3_close_v2(db)
+			return nil, err
+		}
 	}
 
 	// USER AUTHENTICATION
@@ -1891,7 +1907,7 @@ func (s *SQLiteStmt) exec(ctx context.Context, args []namedValue) (driver.Result
 		resultCh <- result{r, err}
 	}()
 	select {
-	case rv := <- resultCh:
+	case rv := <-resultCh:
 		return rv.r, rv.err
 	case <-ctx.Done():
 		select {
@@ -1992,7 +2008,7 @@ func (rc *SQLiteRows) Next(dest []driver.Value) error {
 		resultCh <- rc.nextSyncLocked(dest)
 	}()
 	select {
-	case err := <- resultCh:
+	case err := <-resultCh:
 		return err
 	case <-rc.ctx.Done():
 		select {
